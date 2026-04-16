@@ -1,5 +1,7 @@
 package com.medisphere.admin.service;
 
+import com.medisphere.admin.client.AuthClient;
+import com.medisphere.admin.client.NotificationClient;
 import com.medisphere.admin.dto.ApprovalRequestDTO;
 import com.medisphere.admin.dto.DoctorRequestDTO;
 import com.medisphere.admin.entity.MedisphereAdmin;
@@ -22,8 +24,10 @@ import java.util.Map;
 public class AdminService {
 
     private final AdminRepository adminRepository;
-    private final ExternalServiceClient externalServiceClient;
+    private final AuthClient authClient;
+    private final NotificationClient notificationClient;
     private final PasswordEncoder passwordEncoder;
+    private final ExternalServiceClient externalServiceClient;
 
     @Transactional
     public MedisphereAdmin registerDoctor(DoctorRequestDTO doctorDTO) {
@@ -55,9 +59,56 @@ public class AdminService {
         doctor.setReviewedBy("ADMIN");
         MedisphereAdmin savedDoctor = adminRepository.save(doctor);
 
-        // External Calls - Note: Sends the already encoded password to Auth Service
-        externalServiceClient.createAuthUser(doctor.getEmail(), doctor.getPassword());
-        externalServiceClient.sendNotification(doctor.getEmail(), "Your doctor registration has been approved!");
+        // External Calls - Send pre-encoded password to Auth Service via Feign Client
+        Map<String, String> authPayload = new HashMap<>();
+        authPayload.put("email", doctor.getEmail());
+        authPayload.put("password", doctor.getPassword());
+        authPayload.put("role", "DOCTOR");
+        
+        // Pass extra details so Auth Service can synchronize with Doctor Service
+        authPayload.put("firstName", doctor.getFirstName());
+        authPayload.put("lastName", doctor.getLastName());
+        authPayload.put("phone", doctor.getPhone() != null ? doctor.getPhone() : "N/A");
+        authPayload.put("specialty", doctor.getSpecialty() != null ? doctor.getSpecialty() : "General");
+        authPayload.put("licenseUrl", doctor.getLicenseUrl() != null ? doctor.getLicenseUrl() : "N/A");
+
+
+        Map<String, Object> authResponse = authClient.createAuthUser(authPayload);
+        
+        // Check if user creation was successful
+        String status = (String) authResponse.get("status");
+        if ("FAILED".equalsIgnoreCase(status)) {
+            String message = (String) authResponse.get("message");
+            throw new RuntimeException("Failed to create Auth User: " + message);
+        }
+        
+        String msUserId = (String) authResponse.get("data");
+
+        // Send Approval Notification via Email
+        try {
+            Map<String, Object> doctorNotification = new HashMap<>();
+            doctorNotification.put("userId", doctor.getEmail());
+            doctorNotification.put("userRole", "DOCTOR");
+            doctorNotification.put("title", "Medisphere Account Approved");
+            String approvalMessage = String.format(
+                "Dear Dr. %s,\n\n" +
+                "We are pleased to inform you that your registration with Medisphere Healthcare Platform has been approved.\n\n" +
+                "You can now access your account and start managing your profile and appointments.\n\n" +
+                "Login Details:\n" +
+                "- Username: %s\n" +
+                "- Login URL: [Hospital Portal Link]\n\n" +
+                "Please use the password you created during your registration. Welcome to our medical community!\n\n" +
+                "Best regards,\n" +
+                "Medisphere Team",
+                doctor.getLastName(), doctor.getEmail()
+            );
+            doctorNotification.put("message", approvalMessage);
+            doctorNotification.put("channel", "EMAIL");
+            
+            notificationClient.createNotification(doctorNotification);
+        } catch (Exception notificationEx) {
+            log.error("Failed to send approval notification to: {}", doctor.getEmail(), notificationEx);
+        }
 
         return savedDoctor;
     }
@@ -73,8 +124,33 @@ public class AdminService {
         doctor.setReviewedBy("ADMIN");
         MedisphereAdmin savedDoctor = adminRepository.save(doctor);
 
-        // External Call
-        externalServiceClient.sendNotification(doctor.getEmail(), "Your doctor registration has been rejected. Reason: " + rejectionRequest.getRejectionReason());
+        // Revoke Access in Auth Service
+        authClient.deleteAuthUser(doctor.getEmail());
+        log.info("Access revoked in Auth Service for doctor: {}", doctor.getEmail());
+
+        // Send Rejection Notification via Email
+        try {
+            Map<String, Object> doctorNotification = new HashMap<>();
+            doctorNotification.put("userId", doctor.getEmail());
+            doctorNotification.put("userRole", "DOCTOR");
+            doctorNotification.put("title", "Update: Medisphere Registration Status");
+            String rejectionMessage = String.format(
+                "Dear Dr. %s,\n\n" +
+                "Thank you for your interest in joining the Medisphere Healthcare Platform.\n\n" +
+                "We have reviewed your application, and we regret to inform you that your registration has not been approved at this time.\n\n" +
+                "Reason for Rejection: %s\n\n" +
+                "If you believe this is an error or would like to provide additional information, please contact our support team.\n\n" +
+                "Best regards,\n" +
+                "Medisphere Team",
+                doctor.getLastName(), rejectionRequest.getRejectionReason()
+            );
+            doctorNotification.put("message", rejectionMessage);
+            doctorNotification.put("channel", "EMAIL");
+            
+            notificationClient.createNotification(doctorNotification);
+        } catch (Exception notificationEx) {
+            log.error("Failed to send rejection notification to: {}", doctor.getEmail(), notificationEx);
+        }
 
         return savedDoctor;
     }
