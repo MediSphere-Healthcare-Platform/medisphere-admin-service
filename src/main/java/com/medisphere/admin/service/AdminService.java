@@ -28,19 +28,32 @@ public class AdminService {
     private final NotificationClient notificationClient;
     private final PasswordEncoder passwordEncoder;
     private final ExternalServiceClient externalServiceClient;
+    private final CloudinaryService cloudinaryService;
 
     @Transactional
-    public MedisphereAdmin registerDoctor(DoctorRequestDTO doctorDTO) {
+    public MedisphereAdmin registerDoctor(DoctorRequestDTO doctorDTO,
+                                          org.springframework.web.multipart.MultipartFile licenceImage) {
         log.info("Registering doctor: {}", doctorDTO.getEmail());
+
+        // Upload licence image to Cloudinary
+        String licenceUrl = doctorDTO.getLicenseUrl(); // fallback (e.g. from internal calls)
+        if (licenceImage != null && !licenceImage.isEmpty()) {
+            try {
+                licenceUrl = cloudinaryService.uploadLicenceImage(licenceImage);
+                log.info("Licence uploaded to Cloudinary: {}", licenceUrl);
+            } catch (Exception e) {
+                log.error("Cloudinary upload failed, proceeding without image: {}", e.getMessage());
+            }
+        }
+
         MedisphereAdmin doctor = new MedisphereAdmin();
         doctor.setEmail(doctorDTO.getEmail());
-        // Encode password before saving to DB
         doctor.setPassword(passwordEncoder.encode(doctorDTO.getPassword()));
         doctor.setFirstName(doctorDTO.getFirstName());
         doctor.setLastName(doctorDTO.getLastName());
         doctor.setPhone(doctorDTO.getPhone());
         doctor.setSpecialty(doctorDTO.getSpecialty());
-        doctor.setLicenseUrl(doctorDTO.getLicenseUrl());
+        doctor.setLicenseUrl(licenceUrl);
         doctor.setStatus("PENDING");
         return adminRepository.save(doctor);
     }
